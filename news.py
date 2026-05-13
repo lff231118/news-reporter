@@ -270,9 +270,8 @@ def send_email(content):
         msg.attach(body)
 
         # 连接Gmail的SMTP服务器，发送邮件
-        # 587是Gmail SMTP的标准端口
-        with smtplib.SMTP("smtp.gmail.com", 587) as server:
-            server.starttls()  # 开启加密传输
+        # 465是Gmail SMTP的SSL端口
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
             server.login(GMAIL_ADDRESS, GMAIL_PASSWORD)  # 登录
             server.sendmail(GMAIL_ADDRESS, RECIPIENT, msg.as_string())  # 发送
 
