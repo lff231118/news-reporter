@@ -255,25 +255,28 @@ def analyze_and_report(sources, focus=""):
 # 第七部分：发送邮件
 def send_email(content):
     """
-    用Gmail发送简报到QQ邮箱
-    smtplib是Python内置的邮件发送库，不需要安装
+    用QQ邮箱发送简报
+    QQ邮箱SMTP服务器：smtp.qq.com，端口465
     """
     try:
+        # 从环境变量读取QQ邮箱配置
+        qq_email = os.getenv("QQ_EMAIL")
+        qq_password = os.getenv("QQ_PASSWORD")
+
         # 构建邮件
         msg = MIMEMultipart("alternative")
         msg["Subject"] = f"今日热点简报 {datetime.now().strftime('%Y年%m月%d日')}"
-        msg["From"] = GMAIL_ADDRESS
+        msg["From"] = qq_email
         msg["To"] = RECIPIENT
 
-        # 邮件正文，用纯文本格式
+        # 邮件正文
         body = MIMEText(content, "plain", "utf-8")
         msg.attach(body)
 
-        # 连接Gmail的SMTP服务器，发送邮件
-        # 465是Gmail SMTP的SSL端口
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-            server.login(GMAIL_ADDRESS, GMAIL_PASSWORD)  # 登录
-            server.sendmail(GMAIL_ADDRESS, RECIPIENT, msg.as_string())  # 发送
+        # 连接QQ邮箱SMTP服务器
+        with smtplib.SMTP_SSL("smtp.qq.com", 465) as server:
+            server.login(qq_email, qq_password)
+            server.sendmail(qq_email, RECIPIENT, msg.as_string())
 
         print(f"✅ 简报已发送到：{RECIPIENT}")
 
