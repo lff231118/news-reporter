@@ -312,20 +312,17 @@ def run_daily_report():
 # 第十部分：定时任务
 print("=== 全网热点聚合分析器 ===")
 print("程序已启动，每天09:30自动生成并发送简报")
-print("输入 n 立即运行一次，或等待定时任务\n")
 
 # 设置每天09:30执行
 schedule.every().day.at("09:30").do(run_daily_report)
 
-# 询问是否立即运行一次
-choice = input("是否立即运行一次？(y/n)：").strip().lower()
-if choice == "y":
-    run_daily_report()
+# 启动时立即运行一次，确认程序正常
+print("启动时运行一次，验证程序正常...")
+run_daily_report()
 
 # 保持程序运行，等待定时任务
 print("\n⏰ 定时任务等待中，下次执行时间：每天 09:30")
-print("按 Ctrl+C 退出程序\n")
 
 while True:
-    schedule.run_pending()  # 检查是否有任务需要执行
-    time.sleep(60)          # 每60秒检查一次
+    schedule.run_pending()
+    time.sleep(60)
