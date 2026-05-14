@@ -16,7 +16,6 @@ from dotenv import load_dotenv
 from datetime import datetime
 from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor  # 并行抓取
-import resend  #发送邮件
 
 
 # 第二部分：读取环境变量
@@ -256,21 +255,25 @@ def analyze_and_report(sources, focus=""):
 # 第七部分：发送邮件
 def send_email(content):
     """
-    用Resend API发送简报
-    Resend专为开发者设计，在服务器上稳定可靠
+    用QQ邮箱SMTP发送简报
     """
     try:
-        resend.api_key = os.getenv("RESEND_API_KEY")
+        qq_email = os.getenv("QQ_EMAIL")
+        qq_password = os.getenv("QQ_PASSWORD")
 
-        params = {
-            "from": "onboarding@resend.dev",  # Resend默认发件地址
-            "to": RECIPIENT,
-            "subject": f"今日热点简报 {datetime.now().strftime('%Y年%m月%d日')}",
-            "text": content,
-        }
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = f"今日热点简报 {datetime.now().strftime('%Y年%m月%d日')}"
+        msg["From"] = qq_email
+        msg["To"] = RECIPIENT
 
-        email = resend.Emails.send(params)
-        print(f"✅ 简报已发送到：{RECIPIENT}，邮件ID：{email['id']}")
+        body = MIMEText(content, "plain", "utf-8")
+        msg.attach(body)
+
+        with smtplib.SMTP_SSL("smtp.qq.com", 465) as server:
+            server.login(qq_email, qq_password)
+            server.sendmail(qq_email, RECIPIENT, msg.as_string())
+
+        print(f"✅ 简报已发送到：{RECIPIENT}")
 
     except Exception as e:
         print(f"❌ 邮件发送失败：{e}")
