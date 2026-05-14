@@ -15,7 +15,7 @@ from openai import OpenAI
 from dotenv import load_dotenv
 from datetime import datetime
 from bs4 import BeautifulSoup
-from concurrent.futures import ThreadPoolExecutor  # 并行抓取
+from concurrent.futures import ThreadPoolExecutor import resend # 并行抓取#发送邮件
 
 
 # 第二部分：读取环境变量
@@ -255,30 +255,21 @@ def analyze_and_report(sources, focus=""):
 # 第七部分：发送邮件
 def send_email(content):
     """
-    用QQ邮箱发送简报
-    QQ邮箱SMTP服务器：smtp.qq.com，端口465
+    用Resend API发送简报
+    Resend专为开发者设计，在服务器上稳定可靠
     """
     try:
-        # 从环境变量读取QQ邮箱配置
-        qq_email = os.getenv("QQ_EMAIL")
-        qq_password = os.getenv("QQ_PASSWORD")
+        resend.api_key = os.getenv("RESEND_API_KEY")
 
-        # 构建邮件
-        msg = MIMEMultipart("alternative")
-        msg["Subject"] = f"今日热点简报 {datetime.now().strftime('%Y年%m月%d日')}"
-        msg["From"] = qq_email
-        msg["To"] = RECIPIENT
+        params = {
+            "from": "onboarding@resend.dev",  # Resend默认发件地址
+            "to": RECIPIENT,
+            "subject": f"今日热点简报 {datetime.now().strftime('%Y年%m月%d日')}",
+            "text": content,
+        }
 
-        # 邮件正文
-        body = MIMEText(content, "plain", "utf-8")
-        msg.attach(body)
-
-        # 连接QQ邮箱SMTP服务器
-        with smtplib.SMTP_SSL("smtp.qq.com", 465) as server:
-            server.login(qq_email, qq_password)
-            server.sendmail(qq_email, RECIPIENT, msg.as_string())
-
-        print(f"✅ 简报已发送到：{RECIPIENT}")
+        email = resend.Emails.send(params)
+        print(f"✅ 简报已发送到：{RECIPIENT}，邮件ID：{email['id']}")
 
     except Exception as e:
         print(f"❌ 邮件发送失败：{e}")
