@@ -15,7 +15,8 @@ from openai import OpenAI
 from dotenv import load_dotenv
 from datetime import datetime
 from bs4 import BeautifulSoup
-from concurrent.futures import ThreadPoolExecutor import resend # 并行抓取#发送邮件
+from concurrent.futures import ThreadPoolExecutor  # 并行抓取
+import resend  #发送邮件
 
 
 # 第二部分：读取环境变量
