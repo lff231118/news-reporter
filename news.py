@@ -302,20 +302,18 @@ def run_daily_report():
     send_email(report)
 
 
-# 第十部分：定时任务
+# 第十部分：主程序
+# GitHub Actions模式：直接运行一次，完成后退出
 print("=== 全网热点聚合分析器 ===")
-print("程序已启动，每天09:30自动生成并发送简报")
+print(f"运行时间：{datetime.now().strftime('%Y年%m月%d日 %H:%M')}\n")
 
-# 设置每天09:30执行
-schedule.every().day.at("09:30").do(run_daily_report)
+sources = fetch_all_sources()
 
-# 启动时立即运行一次，确认程序正常
-print("启动时运行一次，验证程序正常...")
-run_daily_report()
+print("\n🤖 AI正在分析，请稍候...\n")
+report = analyze_and_report(sources)
 
-# 保持程序运行，等待定时任务
-print("\n⏰ 定时任务等待中，下次执行时间：每天 09:30")
+print(report)
+save_report(report)
+send_email(report)
 
-while True:
-    schedule.run_pending()
-    time.sleep(60)
+print("\n✅ 任务完成，程序退出")
