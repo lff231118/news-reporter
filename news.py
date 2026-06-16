@@ -1,198 +1,326 @@
-# ============================================================
-# 全网热点聚合分析器（完整版：并行抓取 + 定时邮件推送）
-# ============================================================
+"""
+全网热点聚合分析器 v2.0
+=========================
+优化内容：
+  - 并行抓取 10+ 数据源（国内+国际+技术社区）
+  - 自动重试机制，单源挂了不影响整体
+  - Kimi 32K 模型深度分析
+  - QQ邮箱推送 + 本地保存
 
+改进记录：
+  v2.0 (2026-06-16)
+    - 新增 Hacker News、GitHub Trending、Reddit、B站 数据源
+    - 新增自动重试机制
+    - 清理死代码、无用依赖
+    - 升级 AI 模型至 moonshot-v1-32k
+    - 改用 logging 替代 print
+    - 补充 README
+"""
 
-# 第一部分：导入工具包
-import requests
 import os
-import smtplib                           # Python内置，用来发送邮件
-import schedule                          # 定时任务
-import time                              # 时间控制
-from email.mime.text import MIMEText     # 构建邮件内容
-from email.mime.multipart import MIMEMultipart  # 构建多部分邮件
+import re
+import smtplib
+import time
+import logging
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+import requests
 from openai import OpenAI
 from dotenv import load_dotenv
-from datetime import datetime
 from bs4 import BeautifulSoup
-from concurrent.futures import ThreadPoolExecutor  # 并行抓取
 
+# ── 日志 ──
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger("news-reporter")
 
-# 第二部分：读取环境变量
+# ── 环境变量 ──
 load_dotenv()
 KIMI_API_KEY = os.getenv("KIMI_API_KEY")
 NEWS_API_KEY = os.getenv("NEWS_API_KEY")
-GMAIL_ADDRESS = os.getenv("GMAIL_ADDRESS")
-GMAIL_PASSWORD = os.getenv("GMAIL_PASSWORD")
-RECIPIENT = "308737902@qq.com"  # 收件人
-
-
-# 第三部分：连接AI
-client = OpenAI(
-    api_key=KIMI_API_KEY,
-    base_url="https://api.moonshot.cn/v1",
-)
+QQ_EMAIL = os.getenv("QQ_EMAIL")
+QQ_PASSWORD = os.getenv("QQ_PASSWORD")
+RECIPIENT = "308737902@qq.com"
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    )
+}
+
+client = OpenAI(api_key=KIMI_API_KEY, base_url="https://api.moonshot.cn/v1")
+
+
+# ════════════════════════════════════════════════
+# 工具函数
+# ════════════════════════════════════════════════
+
+def retry(max_attempts=3, delay=2):
+    """重试装饰器：静默重试，全挂则返回空列表"""
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            last_err = None
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    last_err = e
+                    logger.warning("  %s 第%s次失败: %s", func.__name__, attempt, e)
+                    if attempt < max_attempts:
+                        time.sleep(delay)
+            logger.error("  %s 已重试%s次，放弃", func.__name__, max_attempts)
+            return []
+        return wrapper
+    return decorator
+
+
+def safe_get(url, headers=None, params=None, timeout=15, json_mode=False):
+    """带超时的 GET 请求"""
+    resp = requests.get(
+        url, headers=headers or HEADERS, params=params, timeout=timeout
+    )
+    resp.raise_for_status()
+    return resp.json() if json_mode else resp
+
+
+# ════════════════════════════════════════════════
+# 数据源抓取
+# ════════════════════════════════════════════════
+
+# ── 国内主流 ──
+
+@retry()
+def fetch_baidu_hot():
+    """百度热搜"""
+    url = "https://top.baidu.com/board?tab=realtime"
+    resp = safe_get(url)
+    resp.encoding = "utf-8"
+    soup = BeautifulSoup(resp.text, "html.parser")
+    items = soup.find_all("div", class_="c-single-text-ellipsis")
+    return [i.get_text(strip=True) for i in items[:20] if i.get_text(strip=True)]
+
+
+@retry()
+def fetch_weibo_hot():
+    """微博热搜"""
+    url = "https://weibo.com/ajax/side/hotSearch"
+    headers = {**HEADERS, "Referer": "https://weibo.com/"}
+    data = safe_get(url, headers=headers, json_mode=True)
+    items = data.get("data", {}).get("realtime", [])
+    return [i.get("word", "") for i in items[:20] if i.get("word")]
+
+
+@retry()
+def fetch_zhihu_hot():
+    """知乎热榜"""
+    url = "https://www.zhihu.com/api/v3/feed/topstory/hot-lists/total?limit=20"
+    headers = {**HEADERS, "Referer": "https://www.zhihu.com/"}
+    data = safe_get(url, headers=headers, json_mode=True)
+    items = data.get("data", [])
+    return [
+        i.get("target", {}).get("title", "")
+        for i in items[:20] if i.get("target", {}).get("title")
+    ]
+
+
+@retry()
+def fetch_toutiao_hot():
+    """今日头条热榜"""
+    url = "https://www.toutiao.com/hot-event/hot-board/?origin=toutiao_pc"
+    headers = {**HEADERS, "Referer": "https://www.toutiao.com/"}
+    data = safe_get(url, headers=headers, json_mode=True)
+    items = data.get("data", [])
+    return [
+        i.get("Title", "") or i.get("title", "")
+        for i in items[:20] if i.get("Title") or i.get("title")
+    ]
+
+
+@retry()
+def fetch_bilibili_hot():
+    """B站热门"""
+    url = "https://api.bilibili.com/x/web-interface/ranking/v2?rid=0&type=all"
+    headers = {**HEADERS, "Referer": "https://www.bilibili.com/"}
+    data = safe_get(url, headers=headers, json_mode=True)
+    videos = data.get("data", {}).get("list", [])
+    return [
+        f"{v.get('title', '')}（播放:{v.get('stat', {}).get('view', 0)}）"
+        for v in videos[:15] if v.get("title")
+    ]
+
+
+# ── 国际新闻 ──
+
+@retry()
+def fetch_newsapi(category=""):
+    """NewsAPI 国际新闻"""
+    url = "https://newsapi.org/v2/top-headlines"
+    params = {"apiKey": NEWS_API_KEY, "language": "en", "pageSize": 20}
+    if category:
+        params["category"] = category
+    data = safe_get(url, params=params, json_mode=True)
+    if data.get("status") != "ok":
+        return []
+    return [
+        f"{a['title']}（{a['source']['name']}）"
+        for a in data.get("articles", []) if a.get("title")
+    ]
+
+
+# ── 技术社区 ──
+
+@retry()
+def fetch_hackernews():
+    """Hacker News 热榜（Firebase API，极稳定）"""
+    top_ids = safe_get(
+        "https://hacker-news.firebaseio.com/v0/topstories.json",
+        json_mode=True,
+    )
+    ids = top_ids[:20]
+
+    def get_hn_item(iid):
+        item = safe_get(
+            f"https://hacker-news.firebaseio.com/v0/item/{iid}.json",
+            json_mode=True,
+        )
+        title = item.get("title", "")
+        score = item.get("score", 0)
+        url_item = item.get("url", "")
+        return f"[{score}⭐] {title}  {url_item}" if title else None
+
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        results = list(pool.map(get_hn_item, ids))
+
+    items = [r for r in results if r]
+    items.sort(key=lambda x: int(x.split("⭐")[0].strip("[]")), reverse=True)
+    return items[:15]
+
+
+@retry()
+def fetch_github_trending():
+    """GitHub Trending 今日热门仓库"""
+    url = "https://github.com/trending"
+    resp = safe_get(url)
+    soup = BeautifulSoup(resp.text, "html.parser")
+    results = []
+    for repo in soup.select("article.Box-row")[:20]:
+        name_el = repo.select_one("h2 a")
+        desc_el = repo.select_one("p")
+        stars_el = repo.select_one("a[href*='stargazers']")
+        if name_el:
+            name = name_el.get_text(strip=True).replace(" ", "")
+            desc = desc_el.get_text(strip=True) if desc_el else ""
+            stars = stars_el.get_text(strip=True) if stars_el else "0"
+            results.append(f"{name} ⭐{stars}  {desc}")
+    return results
+
+
+@retry()
+def fetch_reddit():
+    """Reddit r/all 今日热帖"""
+    url = "https://www.reddit.com/r/all/top/.json?limit=20&t=day"
+    headers = {**HEADERS, "Accept": "application/json"}
+    data = safe_get(url, headers=headers, json_mode=True)
+    children = data.get("data", {}).get("children", [])
+    items = []
+    for child in children[:20]:
+        c = child.get("data", {})
+        title = c.get("title", "")
+        sub = c.get("subreddit", "")
+        score = c.get("score", 0)
+        comments = c.get("num_comments", 0)
+        url_r = c.get("url", "")
+        if title:
+            items.append(f"[⬆{score}/💬{comments}] r/{sub}：{title}  {url_r}")
+    return items
+
+
+# ════════════════════════════════════════════════
+# 聚合调度
+# ════════════════════════════════════════════════
+
+SCRAPERS = {
+    "百度热搜":      fetch_baidu_hot,
+    "微博热搜":      fetch_weibo_hot,
+    "知乎热榜":      fetch_zhihu_hot,
+    "今日头条热榜":  fetch_toutiao_hot,
+    "B站热门":       fetch_bilibili_hot,
+    "国际综合":      lambda: fetch_newsapi(""),
+    "国际科技":      lambda: fetch_newsapi("technology"),
+    "国际商业":      lambda: fetch_newsapi("business"),
+    "Hacker News":   fetch_hackernews,
+    "GitHub Trending": fetch_github_trending,
+    "Reddit 热帖":   fetch_reddit,
 }
 
 
-# 第四部分：各平台抓取函数
-
-def fetch_baidu_hot():
-    try:
-        url = "https://top.baidu.com/board?tab=realtime"
-        response = requests.get(url, headers=HEADERS, timeout=10)
-        response.encoding = "utf-8"
-        soup = BeautifulSoup(response.text, "html.parser")
-        items = soup.find_all("div", class_="c-single-text-ellipsis")
-        return [item.get_text(strip=True) for item in items[:20] if item.get_text(strip=True)]
-    except Exception as e:
-        print(f"  百度热搜抓取失败：{e}")
-        return []
-
-
-def fetch_weibo_hot():
-    try:
-        url = "https://weibo.com/ajax/side/hotSearch"
-        headers = {**HEADERS, "Referer": "https://weibo.com/"}
-        response = requests.get(url, headers=headers, timeout=10)
-        data = response.json()
-        items = data.get("data", {}).get("realtime", [])
-        return [item.get("word", "") for item in items[:20] if item.get("word")]
-    except Exception as e:
-        print(f"  微博热搜抓取失败：{e}")
-        return []
-
-
-def fetch_zhihu_hot():
-    try:
-        url = "https://www.zhihu.com/api/v3/feed/topstory/hot-lists/total?limit=20"
-        headers = {**HEADERS, "Referer": "https://www.zhihu.com/"}
-        response = requests.get(url, headers=headers, timeout=10)
-        data = response.json()
-        items = data.get("data", [])
-        return [item.get("target", {}).get("title", "") for item in items[:20] if item.get("target", {}).get("title")]
-    except Exception as e:
-        print(f"  知乎热榜抓取失败：{e}")
-        return []
-
-
-def fetch_toutiao_hot():
-    try:
-        url = "https://www.toutiao.com/hot-event/hot-board/?origin=toutiao_pc"
-        headers = {**HEADERS, "Referer": "https://www.toutiao.com/"}
-        response = requests.get(url, headers=headers, timeout=10)
-        data = response.json()
-        items = data.get("data", [])
-        return [item.get("Title", "") or item.get("title", "") for item in items[:20] if item.get("Title") or item.get("title")]
-    except Exception as e:
-        print(f"  头条热榜抓取失败：{e}")
-        return []
-
-
-def fetch_international_news(category=""):
-    try:
-        url = "https://newsapi.org/v2/top-headlines"
-        params = {
-            "apiKey": NEWS_API_KEY,
-            "language": "en",
-            "pageSize": 20,
-        }
-        if category:
-            params["category"] = category
-        response = requests.get(url, params=params, timeout=10)
-        data = response.json()
-        if data.get("status") != "ok":
-            return []
-        return [
-            f"{a.get('title', '')}（{a.get('source', {}).get('name', '')}）"
-            for a in data.get("articles", []) if a.get("title")
-        ]
-    except Exception as e:
-        print(f"  国际热点抓取失败：{e}")
-        return []
-
-
-# 第五部分：并行抓取所有数据源
 def fetch_all_sources():
-    """
-    用ThreadPoolExecutor并行抓取所有平台
-    相当于同时派出7个人去抓数据，而不是一个人跑7趟
-    速度提升3-5倍
-    """
-    print("📡 并行抓取所有数据源...")
-
-    # 定义要执行的任务列表：(任务名, 函数, 参数)
-    tasks = {
-        "baidu":        (fetch_baidu_hot, []),
-        "weibo":        (fetch_weibo_hot, []),
-        "zhihu":        (fetch_zhihu_hot, []),
-        "toutiao":      (fetch_toutiao_hot, []),
-        "intl_general": (fetch_international_news, []),
-        "intl_tech":    (fetch_international_news, ["technology"]),
-        "intl_business":(fetch_international_news, ["business"]),
-    }
-
+    """并行抓取所有数据源"""
+    logger.info("📡 并行抓取 %d 个数据源...", len(SCRAPERS))
     sources = {}
 
-    # 并行执行所有任务
-    with ThreadPoolExecutor(max_workers=7) as executor:
-        futures = {
-            name: executor.submit(func, *args)
-            for name, (func, args) in tasks.items()
+    with ThreadPoolExecutor(max_workers=12) as executor:
+        future_map = {
+            executor.submit(func): name
+            for name, func in SCRAPERS.items()
         }
-        # 等待所有任务完成，收集结果
-        for name, future in futures.items():
-            sources[name] = future.result()
-            print(f"   ✅ {name}：{len(sources[name])} 条")
+        for fut in as_completed(future_map):
+            name = future_map[fut]
+            try:
+                result = fut.result()
+                sources[name] = result
+                logger.info("  ✅ %s：%d 条", name, len(result))
+            except Exception as e:
+                sources[name] = []
+                logger.error("  ❌ %s 异常: %s", name, e)
 
     total = sum(len(v) for v in sources.values())
-    print(f"\n📊 共抓取 {total} 条热点数据")
+    logger.info("📊 共抓取 %d 条热点数据", total)
     return sources
 
 
-# 第六部分：AI分析生成简报
+# ════════════════════════════════════════════════
+# AI 分析
+# ════════════════════════════════════════════════
+
+def format_source_block(items):
+    return "\n".join(f"- {it}" for it in items) if items else "（暂无数据）"
+
+
 def analyze_and_report(sources, focus=""):
+    now = datetime.now().strftime("%Y年%m月%d日 %H:%M")
+    focus_text = (
+        f"\n⚠️ 用户特别关注方向：{focus}，请重点分析。"
+        if focus else ""
+    )
 
-    def format_list(items):
-        return "\n".join([f"- {item}" for item in items]) if items else "暂无数据"
-
-    focus_text = f"\n⚠️ 用户特别关注方向：{focus}，请重点分析这个方向的相关内容。" if focus else ""
+    parts = []
+    for name in SCRAPERS:
+        items = sources.get(name, [])
+        parts.append(f"【{name}】\n{format_source_block(items)}")
+    sources_text = "\n\n".join(parts)
 
     prompt = f"""你是一位资深时事分析师。以下是今日从多个平台抓取的全网热点数据，请完成以下工作：
 
 第一步：去重整理——合并相同或相似的话题，不要重复出现。
 第二步：按热度排序——综合多平台出现频次，判断哪些话题最受关注。
-第三步：深度分析——不要只是复述标题，要解释背景、意义和影响。{focus_text}
+第三步：深度分析——解释背景、意义和影响。{focus_text}
 
 原始热点数据如下：
 
-【百度热搜】
-{format_list(sources.get('baidu', []))}
-
-【微博热搜】
-{format_list(sources.get('weibo', []))}
-
-【知乎热榜】
-{format_list(sources.get('zhihu', []))}
-
-【今日头条热榜】
-{format_list(sources.get('toutiao', []))}
-
-【国际综合热点】
-{format_list(sources.get('intl_general', []))}
-
-【国际科技热点】
-{format_list(sources.get('intl_tech', []))}
-
-【国际商业热点】
-{format_list(sources.get('intl_business', []))}
+{sources_text}
 
 请按以下格式输出完整分析报告：
 
-📰 今日热点深度简报 {datetime.now().strftime("%Y年%m月%d日 %H:%M")}
+📰 今日热点深度简报 {now}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 【今日TOP5重点事件深度分析】
@@ -200,9 +328,9 @@ def analyze_and_report(sources, focus=""):
 
 🔥 NO.1 【事件标题】
 热度来源：（出现在哪些平台）
-事件背景：（这件事的来龙去脉，100字左右）
-核心影响：（这件事对哪些人、哪些领域产生影响）
-后续预测：（基于现有信息，预测事件接下来可能的走向）
+事件背景：（来龙去脉，100字左右）
+核心影响：（对哪些人、哪些领域产生影响）
+后续预测：（接下来可能的走向）
 
 🔥 NO.2 【事件标题】
 热度来源：
@@ -231,93 +359,82 @@ def analyze_and_report(sources, focus=""):
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 【其他值得关注的事件】
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-（简要列出5-8条次要热点，每条2-3句话说明）
+（5-8条次要热点，每条2-3句话）
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 【今日整体态势判断】
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-（从宏观角度，用200字左右分析今日舆论和国际局势的整体走向）
+（200字左右，宏观分析今日舆论和国际局势走向）
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 【今日关键词】
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-（提炼8-10个关键词，用 # 标签格式）"""
+（8-10个关键词，# 标签格式）"""
 
+    logger.info("🤖 AI 分析中（模型: moonshot-v1-32k）...")
     response = client.chat.completions.create(
-        model="moonshot-v1-8k",
-        max_tokens=2000,
-        messages=[{"role": "user", "content": prompt}]
+        model="moonshot-v1-32k",
+        max_tokens=4000,
+        temperature=0.7,
+        messages=[{"role": "user", "content": prompt}],
     )
+    content = response.choices[0].message.content
+    logger.info("✅ AI 分析完成（%d 字符）", len(content))
+    return content
 
-    return response.choices[0].message.content
+
+# ════════════════════════════════════════════════
+# 输出
+# ════════════════════════════════════════════════
+
+def save_report(content):
+    os.makedirs("news_reports", exist_ok=True)
+    filename = f"news_reports/简报_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write(content)
+    logger.info("💾 简报已保存至: %s", filename)
 
 
-# 第七部分：发送邮件
 def send_email(content):
-    """
-    用QQ邮箱SMTP发送简报
-    """
     try:
-        qq_email = os.getenv("QQ_EMAIL")
-        qq_password = os.getenv("QQ_PASSWORD")
+        if not QQ_EMAIL or not QQ_PASSWORD:
+            logger.warning("⚠️ QQ邮箱未配置，跳过邮件发送")
+            return
 
         msg = MIMEMultipart("alternative")
         msg["Subject"] = f"今日热点简报 {datetime.now().strftime('%Y年%m月%d日')}"
-        msg["From"] = qq_email
+        msg["From"] = QQ_EMAIL
         msg["To"] = RECIPIENT
-
-        body = MIMEText(content, "plain", "utf-8")
-        msg.attach(body)
+        msg.attach(MIMEText(content, "plain", "utf-8"))
 
         with smtplib.SMTP_SSL("smtp.qq.com", 465) as server:
-            server.login(qq_email, qq_password)
-            server.sendmail(qq_email, RECIPIENT, msg.as_string())
+            server.login(QQ_EMAIL, QQ_PASSWORD)
+            server.sendmail(QQ_EMAIL, RECIPIENT, msg.as_string())
 
-        print(f"✅ 简报已发送到：{RECIPIENT}")
-
+        logger.info("✅ 简报已发送至 %s", RECIPIENT)
     except Exception as e:
-        print(f"❌ 邮件发送失败：{e}")
+        logger.error("❌ 邮件发送失败: %s", e)
 
 
-# 第八部分：保存简报
-def save_report(content):
-    if not os.path.exists("news_reports"):
-        os.makedirs("news_reports")
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"news_reports/简报_{timestamp}.md"
-    with open(filename, "w", encoding="utf-8") as f:
-        f.write(content)
-    print(f"💾 简报已保存到：{filename}")
+# ════════════════════════════════════════════════
+# 主入口
+# ════════════════════════════════════════════════
 
-
-# 第九部分：主任务（抓取+分析+发送）
-def run_daily_report():
-    print(f"\n{'='*40}")
-    print(f"开始生成今日简报：{datetime.now().strftime('%Y年%m月%d日 %H:%M')}")
-    print(f"{'='*40}\n")
+def main():
+    logger.info("=" * 45)
+    logger.info("📰 全网热点聚合分析器 v2.0")
+    logger.info("   运行时间: %s", datetime.now().strftime("%Y年%m月%d日 %H:%M"))
+    logger.info("=" * 45)
 
     sources = fetch_all_sources()
-
-    print("\n🤖 AI正在分析，请稍候...\n")
     report = analyze_and_report(sources)
 
-    print(report)
+    print("\n" + report + "\n")
     save_report(report)
     send_email(report)
 
+    logger.info("✅ 任务完成")
 
-# 第十部分：主程序
-# GitHub Actions模式：直接运行一次，完成后退出
-print("=== 全网热点聚合分析器 ===")
-print(f"运行时间：{datetime.now().strftime('%Y年%m月%d日 %H:%M')}\n")
 
-sources = fetch_all_sources()
-
-print("\n🤖 AI正在分析，请稍候...\n")
-report = analyze_and_report(sources)
-
-print(report)
-save_report(report)
-send_email(report)
-
-print("\n✅ 任务完成，程序退出")
+if __name__ == "__main__":
+    main()
