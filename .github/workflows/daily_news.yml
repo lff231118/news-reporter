@@ -4,33 +4,28 @@ on:
   schedule:
     # 每天09:30北京时间 = UTC 01:30
     - cron: '30 1 * * *'
-  workflow_dispatch:  # 允许手动触发，方便测试
+  workflow_dispatch:
 
 jobs:
   send_news:
-    runs-on: ubuntu-latest  # 使用GitHub提供的免费Linux服务器
+    runs-on: ubuntu-latest
 
     steps:
-      # 第一步：拉取你的代码
       - name: 拉取代码
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
-      # 第二步：安装Python
       - name: 安装Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      # 第三步：安装依赖包
       - name: 安装依赖
         run: pip install -r requirements.txt
 
-      # 第四步：运行脚本
       - name: 运行简报脚本
         env:
           KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
           NEWS_API_KEY: ${{ secrets.NEWS_API_KEY }}
-          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           QQ_EMAIL: ${{ secrets.QQ_EMAIL }}
           QQ_PASSWORD: ${{ secrets.QQ_PASSWORD }}
         run: python news.py
