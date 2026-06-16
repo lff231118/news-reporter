@@ -46,7 +46,9 @@ KIMI_API_KEY = os.getenv("KIMI_API_KEY")
 NEWS_API_KEY = os.getenv("NEWS_API_KEY")
 QQ_EMAIL = os.getenv("QQ_EMAIL")
 QQ_PASSWORD = os.getenv("QQ_PASSWORD")
-RECIPIENT = os.getenv("RECIPIENT_EMAIL", "308737902@qq.com")
+RECIPIENT = os.getenv("RECIPIENT_EMAIL")
+if not RECIPIENT:
+    raise ValueError("请设置 RECIPIENT_EMAIL 环境变量")
 
 HEADERS = {
     "User-Agent": (
